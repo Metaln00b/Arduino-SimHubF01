@@ -149,19 +149,23 @@ void process_message() {
         &oil_temperature_degC
     );
 
-    uint8_t light_state = 0x00;
+    uint8_t turn_normal = 0b00000001;
+    uint8_t turn_emergency = 0b00000011;
+    uint8_t turn_fast = 0b00000010;
+    uint8_t turn_state = 0b10000000;
 
     if (turn_left == 1)
     {
-        light_state = light_state | 0b01000000;
+        turn_state = turn_normal | 0b00010000;
     }
     if (turn_right == 1)
     {
-        light_state = light_state | 0b00100000;
+        turn_state = turn_normal | 0b00100000;
     }
 
     // Turn Signal
-    uint8_t data1f6[8] = { 0x91, 0xF2, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    uint8_t data1f6[8] = { turn_state, 0xF2, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    
     // Lights
     uint8_t data21a[8] = { 0x04, 0x12, 0xF7, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
