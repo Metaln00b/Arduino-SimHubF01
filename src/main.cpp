@@ -8,8 +8,6 @@ MCP_CAN CAN0(10); // Set CS Pin
 
 #define BUF_SIZE                    64
 
-#define ENGINE_SPEED_FACTOR         32
-
 // Button-Pins
 #define AKBTN_PIN                   3
 #define BKBTN_PIN                   4
@@ -22,6 +20,7 @@ char simhub_message_buf[BUF_SIZE];
 static uint8_t count = 0x00;
 static uint8_t steering_count = 0xA0;
 uint8_t steering_bit = 0b00100000;
+uint8_t rpm_bit = 0b00000001;
 
 void splitBytes(uint16_t num, uint8_t *lowByte, uint8_t *highByte) {
     *lowByte = (uint8_t)(num & 0xFF);
@@ -56,7 +55,12 @@ void setup() {
 
 void sendConstantMessages() {
     // Ignition
-    uint8_t data12f[8] = { 0xFB, count, 0x8A, 0x1C, 0xF1, 0x05, 0x30, 0x86 };
+    uint8_t ignition = 0x88;
+    /// uint8_t illumination_dark = 0b00001000;
+    uint8_t illumination_light = 0b00001010;
+
+    ignition = ignition | illumination_light;
+    uint8_t data12f[8] = { 0xFB, count, ignition, 0x1C, 0xF1, 0x05, 0x30, 0x86 };
     // TPMS
     uint8_t datab68[8] = { 0x00, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00 };
 
@@ -129,7 +133,7 @@ void sendConstantMessages() {
 }
 
 void process_message() {
-    unsigned int revs;
+    unsigned int rpm;
     unsigned int speed_kmh;
     unsigned int fuel_percent;
     int water_temperature_degC;
@@ -139,7 +143,7 @@ void process_message() {
     int oil_temperature_degC;
     
     sscanf(simhub_message_buf, "%u&%u&%u&%d&%d&%d&%d&%d",
-        &revs,
+        &rpm,
         &speed_kmh,
         &fuel_percent,
         &water_temperature_degC,
@@ -150,8 +154,8 @@ void process_message() {
     );
 
     uint8_t turn_normal = 0b00000001;
-    uint8_t turn_emergency = 0b00000011;
-    uint8_t turn_fast = 0b00000010;
+    // uint8_t turn_emergency = 0b00000011;
+    // uint8_t turn_fast = 0b00000010;
     uint8_t turn_state = 0b10000000;
 
     if (turn_left == 1)
@@ -170,19 +174,89 @@ void process_message() {
     uint8_t data21a[8] = { 0x04, 0x12, 0xF7, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
     // RPM
-    // uint8_t calculated_revs = revs / ENGINE_SPEED_FACTOR;
-    uint8_t data0f3[8] = { 0x76, count, 0x00, 2, 1, 0xC4, 0xFF, 0xFF };
+    if (rpm > 40950)
+    {
+        rpm = 40950;
+    }
+    uint8_t revs_data[2] = { 0x00, 0x00 };
+
+    uint16_t rpm_bits = rpm / 10;
+    
+    // Toggle Bit
+    rpm_bit ^= 0b00000001;
+
+    // Set Bit 0 (Toggle) and Bits 4-7
+    revs_data[0] = (rpm_bit & 0x01) | ((rpm_bits & 0x0F) << 4);
+
+    // Byte 2 (Bits 0-7)
+    revs_data[1] = (rpm_bits >> 4) & 0xFF;
+
+    uint8_t data0f3[8] = { 0x76, revs_data[0], revs_data[1], 0x02, 0x01, 0xC4, 0x00, 0x00 };
     
     // Speed
-    // unsigned char lowByte, highByte;
-    // splitBytes(speed_kmh * 10, &lowByte, &highByte);
-    uint8_t data1a1[8] = { count, count, 0x12, 0x14, (uint8_t)speed_kmh, 0x00, 0x00, 0x00 };
+    if (speed_kmh > 255)
+    {
+        speed_kmh = 255;
+    }
+    uint8_t speed_data[2] = { 0x02, 0x00 };
+
+    // Byte 2 (Bits 6-7 and optional Bits 4-5 for decimal)
+    speed_data[0] |= (speed_kmh & 0x03) << 6;
+    // speed_data[0] |= ((speed_kmh & 0x0C) >> 2) << 4;
+
+    // Byte 3 (Bits 0-7)
+    // speed_data[1] |= (speed_kmh >> 4) & 0xFF;
+    speed_data[1] |= (speed_kmh >> 2) & 0x3F;
+
+    uint8_t data1a1[8] = { count, count, speed_data[0], speed_data[1], 0x01, 0x00, 0x00, 0x00 };
 
     // Fuel
-    uint8_t data349[8] = { 0x00, 0x01, 0xBE, 0x0A, 0x00, 0x00, 0x00, 0x00 };
+    if (fuel_percent > 100.0f)
+    {
+        fuel_percent = 100.0f;   
+    }
+    if (fuel_percent < 0.0f)
+    {
+        fuel_percent = 0.0f;
+    }
 
-    // Oiltemp
-    uint8_t data3f9[8] = { 0x02, count, count, 0x00, 0x00, (uint8_t)oil_temperature_degC, count, count };
+    // Calculate percentage
+    float left_tank_liters = 42.5f * (fuel_percent / 100.0f);
+    float right_tank_liters = 30.5f * (fuel_percent / 100.0f);
+
+    // Convert Liters to Ohms (Ohm)
+    uint16_t left_tank_ohms = (uint16_t)(25 + ((42.5f - left_tank_liters) / 42.5f) * (950 - 25));
+    uint16_t right_tank_ohms = (uint16_t)(25 + ((30.5f - right_tank_liters) / 30.5f) * (961 - 25));
+
+    uint8_t left_tank_byte0 = left_tank_ohms & 0xFF;
+    uint8_t left_tank_byte1 = (left_tank_ohms >> 8) & 0xFF;
+    uint8_t right_tank_byte0 = right_tank_ohms & 0xFF;
+    uint8_t right_tank_byte1 = (right_tank_ohms >> 8) & 0xFF;
+
+    uint8_t data349[8] = { left_tank_byte0, left_tank_byte1, right_tank_byte0, right_tank_byte1, 0x00, 0x00, 0x00, 0x00 };
+
+    // Temperature
+    if (water_temperature_degC < -48.0f)
+    {
+        water_temperature_degC = -48.0f;
+    }
+    if (water_temperature_degC > 205.0f)
+    {
+        water_temperature_degC = 205.0f;
+    }
+    if (oil_temperature_degC < -48.0f)
+    {
+        oil_temperature_degC = -48.0f;
+    }
+    if (oil_temperature_degC > 206.0f)
+    {
+        oil_temperature_degC = 206.0f;
+    }
+
+    uint8_t water_temperature_byte = (uint8_t)((water_temperature_degC + 48.0f) / 253.0f * 255.0f);
+    uint8_t oil_temperature_byte = (uint8_t)((oil_temperature_degC + 48.0f) / 254.0f * 255.0f);
+
+    uint8_t data3f9[8] = { 0x02, count, count, 0x00, water_temperature_byte, oil_temperature_byte, count, count };
 
     CAN0.sendMsgBuf(0x1f6, 0, 8, data1f6);
     CAN0.sendMsgBuf(0x21a, 0, 8, data21a);
